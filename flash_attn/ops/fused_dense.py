@@ -2,6 +2,9 @@
 # Inspired by https://github.com/NVIDIA/apex/blob/master/apex/fused_dense/fused_dense.py
 # We make it work with pytorch amp and with bfloat16.
 # The TensorParallel linear modules are inspired by https://github.com/NVIDIA/apex/blob/master/apex/transformer/tensor_parallel/layers.py
+# /mnt/petrelfs/wangguoteng.p/.conda/envs/llm/lib/python3.8/site-packages/flash_attn-0.2.8-py3.8-linux-x86_64.egg/flash_attn/ops/fused_dense.py
+# /mnt/petrelfs/wangguoteng.p/.conda/envs/llm/lib/python3.8/site-packages/flash_attn-0.2.8-py3.8-linux-x86_64.egg/flash_attn/modules/block.py
+# /mnt/petrelfs/wangguoteng.p/.conda/envs/llm/lib/python3.8/site-packages/flash_attn-0.2.8-py3.8-linux-x86_64.egg/flash_attn/ops/layer_norm.py
 from typing import Optional
 from functools import partial
 
@@ -144,6 +147,14 @@ class FusedDense(nn.Linear):
         return fused_dense_func(x, self.weight, self.bias, return_residual=self.return_residual,
                                 process_group=process_group)
 
+class FusedDense_Func(torch.nn.Module):
+    
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, *args, **kwags):
+        return fused_dense_func(*args, **kwags)
+
 
 class ColumnParallelLinear(nn.Linear):
 
@@ -157,12 +168,13 @@ class ColumnParallelLinear(nn.Linear):
                          device=device, dtype=dtype)
         self.process_group = process_group
         self.sequence_parallel = sequence_parallel
+        self.fused_dense_func = FusedDense_Func()
 
     def forward(self, x):
         # If self.sequence_parallel is True, we're doing Tensor Parallel with sequence parallelism:
         # we do an all_gather of x before doing the matmul.
         # If not, then the input is already gathered.
-        return fused_dense_func(x, self.weight, self.bias, process_group=self.process_group,
+        return self.fused_dense_func(x, self.weight, self.bias, process_group=self.process_group,
                                 sequence_parallel=self.sequence_parallel)
 
 
@@ -180,13 +192,14 @@ class RowParallelLinear(nn.Linear):
                          device=device, dtype=dtype)
         self.process_group = process_group
         self.sequence_parallel = sequence_parallel
+        self.fused_dense_func = FusedDense_Func()
 
     def forward(self, x):
         """
         We're doing Tensor Parallel with sequence parallelism: we do the matmul and then
         a reduce_scatter of the result.
         """
-        out = fused_dense_func(x, self.weight, self.bias)
+        out = self.fused_dense_func(x, self.weight, self.bias)
         reduce_fn = reduce_scatter if self.sequence_parallel else all_reduce
         return reduce_fn(out, self.process_group)
 
@@ -401,6 +414,15 @@ def fused_mlp_func(
         return output2 if not return_residual else (output2, x)
 
 
+class FusedMlpFunc_Func(torch.nn.Module):
+    
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, *args, **kwags):
+        return fused_mlp_func(*args, **kwags)
+
+
 class FusedMLP(nn.Module):
 
     def __init__(self, in_features, hidden_features, out_features=None, bias1=True,
@@ -437,6 +459,9 @@ class FusedMLP(nn.Module):
         self.heuristic = heuristic
         self.fc1 = nn.Linear(in_features, hidden_features, bias=bias1, **factory_kwargs)
         self.fc2 = nn.Linear(hidden_features, out_features, bias=bias2, **factory_kwargs)
+        self.fused_mlp_func = FusedMlpFunc_Func()
+        self.add_module(f"fc1", self.fc1)
+        self.add_module(f"fc2", self.fc2)
 
     def forward(self, x, process_group=None):
         dtype = x.dtype if not torch.is_autocast_enabled() else torch.get_autocast_gpu_dtype()
@@ -448,7 +473,7 @@ class FusedMLP(nn.Module):
                 heuristic = 0
         else:
             heuristic = self.heuristic
-        out = fused_mlp_func(
+        out = self.fused_mlp_func(
             x, self.fc1.weight, self.fc2.weight, self.fc1.bias, self.fc2.bias,
             activation=self.activation, save_pre_act=self.training,
             return_residual=self.return_residual, checkpoint_lvl=self.checkpoint_lvl,
@@ -499,6 +524,9 @@ class ParallelFusedMLP(nn.Module):
                                         bias=bias1, **factory_kwargs)
         self.fc2 = RowParallelLinear(hidden_features, out_features, process_group,
                                      bias=bias2, **factory_kwargs)
+        self.fused_mlp_func = FusedMlpFunc_Func()
+        self.add_module(f"fc1", self.fc1)
+        self.add_module(f"fc2", self.fc2)
 
     def forward(self, x):
         dtype = x.dtype if not torch.is_autocast_enabled() else torch.get_autocast_gpu_dtype()
@@ -510,7 +538,7 @@ class ParallelFusedMLP(nn.Module):
                 heuristic = 0
         else:
             heuristic = self.heuristic
-        out = fused_mlp_func(
+        out = self.fused_mlp_func(
             x, self.fc1.weight, self.fc2.weight, self.fc1.bias, self.fc2.bias,
             activation=self.activation, save_pre_act=self.training,
             checkpoint_lvl=self.checkpoint_lvl, heuristic=heuristic,

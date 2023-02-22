@@ -14,7 +14,7 @@ from flash_attn.modules.mha import MHA
 from flash_attn.modules.mlp import Mlp
 
 try:
-    from flash_attn.ops.layer_norm import dropout_add_layer_norm
+    from flash_attn.ops.layer_norm import dropout_add_layer_norm, DropoutAddLayerNorm_Func
 except ImportError:
     dropout_add_layer_norm = None
 
@@ -63,6 +63,7 @@ class Block(nn.Module):
             self.drop_path2 = StochasticDepth(drop_path2, mode='row')
             self.norm2 = norm_cls(dim)
 
+        self.dropout_add_layer_norm_module = DropoutAddLayerNorm_Func()
         if self.fused_dropout_add_ln:
             assert dropout_add_layer_norm is not None, 'dropout_add_ln is not installed'
             assert isinstance(self.norm1, nn.LayerNorm) and isinstance(self.dropout1, nn.Dropout)
@@ -114,7 +115,7 @@ class Block(nn.Module):
                         hidden_states.shape[:-1], device=hidden_states.device,
                         dtype=hidden_states.dtype)
                     )
-                hidden_states, residual = dropout_add_layer_norm(
+                hidden_states, residual = self.dropout_add_layer_norm_module(
                     hidden_states, residual, self.norm1.weight, self.norm1.bias,
                     self.dropout1.p if self.training else 0.0, self.norm1.eps,
                     rowscale=rowscale1, prenorm=True, residual_in_fp32=self.residual_in_fp32
@@ -141,7 +142,7 @@ class Block(nn.Module):
                             hidden_states.shape[:-1], device=hidden_states.device,
                             dtype=hidden_states.dtype)
                         )
-                    hidden_states, residual = dropout_add_layer_norm(
+                    hidden_states, residual = self.dropout_add_layer_norm_module(
                         hidden_states, residual, self.norm2.weight, self.norm2.bias,
                         self.dropout2.p if self.training else 0.0, self.norm2.eps,
                         rowscale=rowscale2, prenorm=True, residual_in_fp32=self.residual_in_fp32
@@ -165,7 +166,7 @@ class Block(nn.Module):
                     rowscale1 = self.drop_path1(torch.ones(
                         mixer_out.shape[:-1], device=mixer_out.device, dtype=mixer_out.dtype)
                     )
-                hidden_states = dropout_add_layer_norm(
+                hidden_states = self.dropout_add_layer_norm_module(
                     mixer_out, hidden_states, self.norm1.weight, self.norm1.bias,
                     self.dropout1.p if self.training else 0.0, self.norm1.eps,
                     rowscale=rowscale1, prenorm=False
@@ -184,7 +185,7 @@ class Block(nn.Module):
                         rowscale2 = self.drop_path2(torch.ones(
                             mlp_out.shape[:-1], device=mlp_out.device, dtype=mlp_out.dtype)
                         )
-                    hidden_states = dropout_add_layer_norm(
+                    hidden_states = self.dropout_add_layer_norm_module(
                         mlp_out, hidden_states, self.norm2.weight, self.norm2.bias,
                         self.dropout2.p if self.training else 0.0, self.norm2.eps,
                         rowscale=rowscale2, prenorm=False
